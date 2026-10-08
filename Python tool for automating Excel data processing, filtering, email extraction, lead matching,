@@ -1,0 +1,333 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import pandas as pd
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# Application identifier for which data should be fetched.
+# Change this value if you use a different identifier.
+REQUIRED_APP_ID = "example_app"
+
+# Email addresses / fragments to be excluded.
+# Replace sample values with your own.
+EXCLUDED_EMAIL_PATTERNS = [
+    "@example-internal-domain.com",
+    "internal-system"
+]
+
+
+# ============================================================
+# LOGIC
+# ============================================================
+
+def email_is_allowed(email):
+    """Checks whether the email address should be included."""
+
+    if pd.isna(email):
+        return False
+
+    email = str(email).strip().lower()
+
+    if not email:
+        return False
+
+    for pattern in EXCLUDED_EMAIL_PATTERNS:
+        if pattern.lower() in email:
+            return False
+
+    return True
+
+
+class ModernEmailExtractor:
+    def __init__(self, root):
+        self.root = root
+
+        self.root.title("Email List Generator")
+        self.root.geometry("650x500")
+        self.root.resizable(False, False)
+
+        self.file_path = None
+
+        self.create_interface()
+
+    def create_interface(self):
+        """Creates the user interface."""
+
+        title = tk.Label(
+            self.root,
+            text="Email List Generator",
+            font=("Arial", 20, "bold")
+        )
+        title.pack(pady=(25, 10))
+
+        subtitle = tk.Label(
+            self.root,
+            text="Select an Excel file and specify the date range.",
+            font=("Arial", 10)
+        )
+        subtitle.pack(pady=(0, 20))
+
+        # ----------------------------------------------------
+        # File Selection
+        # ----------------------------------------------------
+
+        file_frame = tk.Frame(self.root)
+        file_frame.pack(fill="x", padx=40, pady=10)
+
+        self.file_label = tk.Label(
+            file_frame,
+            text="No file selected",
+            anchor="w"
+        )
+        self.file_label.pack(side="left", fill="x", expand=True)
+
+        file_button = ttk.Button(
+            file_frame,
+            text="Select File",
+            command=self.select_file
+        )
+        file_button.pack(side="right")
+
+        # ----------------------------------------------------
+        # Start Date
+        # ----------------------------------------------------
+
+        start_frame = tk.Frame(self.root)
+        start_frame.pack(fill="x", padx=40, pady=8)
+
+        tk.Label(
+            start_frame,
+            text="Start Date:"
+        ).pack(side="left")
+
+        self.start_date_entry = ttk.Entry(
+            start_frame,
+            width=20
+        )
+        self.start_date_entry.pack(side="right")
+
+        # ----------------------------------------------------
+        # End Date
+        # ----------------------------------------------------
+
+        end_frame = tk.Frame(self.root)
+        end_frame.pack(fill="x", padx=40, pady=8)
+
+        tk.Label(
+            end_frame,
+            text="End Date:"
+        ).pack(side="left")
+
+        self.end_date_entry = ttk.Entry(
+            end_frame,
+            width=20
+        )
+        self.end_date_entry.pack(side="right")
+
+        # ----------------------------------------------------
+        # Diagnosis / Additional Filter
+        # ----------------------------------------------------
+
+        diagnosis_frame = tk.Frame(self.root)
+        diagnosis_frame.pack(fill="x", padx=40, pady=8)
+
+        tk.Label(
+            diagnosis_frame,
+            text="Diagnosis:"
+        ).pack(side="left")
+
+        self.diagnosis_entry = ttk.Entry(
+            diagnosis_frame,
+            width=20
+        )
+        self.diagnosis_entry.pack(side="right")
+
+        # ----------------------------------------------------
+        # Generate Button
+        # ----------------------------------------------------
+
+        generate_button = ttk.Button(
+            self.root,
+            text="Generate Email List",
+            command=self.generate_emails
+        )
+        generate_button.pack(pady=30)
+
+    def select_file(self):
+        """Allows the user to select an Excel file."""
+
+        file_path = filedialog.askopenfilename(
+            title="Select Excel File",
+            filetypes=[
+                ("Excel Files", "*.xlsx"),
+                ("All Files", "*.*")
+            ]
+        )
+
+        if file_path:
+            self.file_path = file_path
+
+            self.file_label.config(
+                text=file_path
+            )
+
+    def generate_emails(self):
+        """Processes the file and generates an email list."""
+
+        if not self.file_path:
+            messagebox.showwarning(
+                "Missing File",
+                "Please select an Excel file first."
+            )
+            return
+
+        try:
+            start_date = pd.to_datetime(
+                self.start_date_entry.get()
+            )
+
+            end_date = pd.to_datetime(
+                self.end_date_entry.get()
+            )
+
+        except Exception:
+            messagebox.showerror(
+                "Invalid Date",
+                "Please enter valid dates."
+            )
+            return
+
+        try:
+            df = pd.read_excel(self.file_path)
+
+            required_columns = [
+                "dataFaktury",
+                "reseller",
+                "email",
+                "idAplikacji",
+                "dataZgloszeniaDoUsuniecia"
+            ]
+
+            missing_columns = [
+                column
+                for column in required_columns
+                if column not in df.columns
+            ]
+
+            if missing_columns:
+                messagebox.showerror(
+                    "Missing Columns",
+                    "The following required columns are missing:\n\n"
+                    + "\n".join(missing_columns)
+                )
+                return
+
+            # ------------------------------------------------
+            # Date Conversion
+            # ------------------------------------------------
+
+            df["dataFaktury"] = pd.to_datetime(
+                df["dataFaktury"],
+                errors="coerce"
+            )
+
+            # ------------------------------------------------
+            # Data Filtering
+            # ------------------------------------------------
+
+            filtered_df = df[
+                (df["dataFaktury"] >= start_date)
+                & (df["dataFaktury"] <= end_date)
+                & (df["reseller"].astype(str).str.lower() == "false")
+                & (df["idAplikacji"] == REQUIRED_APP_ID)
+                & (
+                    df["dataZgloszeniaDoUsuniecia"].isna()
+                    | (
+                        df["dataZgloszeniaDoUsuniecia"]
+                        .astype(str)
+                        .str.strip()
+                        .eq("")
+                    )
+                )
+            ].copy()
+
+            # ------------------------------------------------
+            # Email Address Filtering
+            # ------------------------------------------------
+
+            filtered_df = filtered_df[
+                filtered_df["email"].apply(email_is_allowed)
+            ]
+
+            # ------------------------------------------------
+            # List Preparation
+            # ------------------------------------------------
+
+            emails = (
+                filtered_df["email"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .drop_duplicates()
+                .sort_values()
+            )
+
+            if emails.empty:
+                messagebox.showinfo(
+                    "No Results",
+                    "No email addresses were found matching the criteria."
+                )
+                return
+
+            result_df = pd.DataFrame({
+                "email": emails
+            })
+
+            # ------------------------------------------------
+            # Output Location Selection
+            # ------------------------------------------------
+
+            output_path = filedialog.asksaveasfilename(
+                title="Save Result",
+                defaultextension=".xlsx",
+                filetypes=[
+                    ("Excel File", "*.xlsx")
+                ],
+                initialfile="email_list.xlsx"
+            )
+
+            if not output_path:
+                return
+
+            result_df.to_excel(
+                output_path,
+                index=False
+            )
+
+            messagebox.showinfo(
+                "Success",
+                f"The list has been successfully generated.\n\n"
+                f"Total addresses: {len(result_df)}\n\n"
+                f"File saved to:\n{output_path}"
+            )
+
+        except Exception as error:
+            messagebox.showerror(
+                "Error",
+                f"An error occurred during processing:\n\n{error}"
+            )
+
+
+# ============================================================
+# APPLICATION START
+# ============================================================
+
+if __name__ == "__main__":
+    root = tk.Tk()
+
+    app = ModernEmailExtractor(root)
+
+    root.mainloop()
