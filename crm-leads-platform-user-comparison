@@ -1,0 +1,255 @@
+"""
+This script compares lead data from the CRM system with the platform's user database,
+taking into account the division by 'Service Type' ("Type A" vs "Type B")
+and date chronology (whether the client had an account before submitting the request).
+
+Requirements:
+    pip install pandas openpyxl
+
+Usage:
+    python compare_leads.py
+"""
+
+import sys
+import re
+import pandas as pd
+
+
+# ============================
+# CONFIGURATION
+# ============================
+FILE_PLATFORM_USERS = "users_database.xlsx"
+FILE_CRM_LEADS = "crm_leads.xlsx"
+FILE_OUTPUT = "lead_comparison_results.xlsx"
+
+# Key column names in each file
+COL_USER_TAX_ID = "tax_id"
+COL_USER_EMAIL = "email"
+
+COL_LEAD_TAX_ID = "Company Tax ID"
+COL_LEAD_EMAIL = "Email Address"
+COL_LEAD_SERVICE_TYPE = "Service Type"
+COL_LEAD_SUBMISSION_DATE = "Submission Date"
+
+
+# ============================
+# HELPER FUNCTIONS
+# ============================
+def normalize_tax_id(value):
+    """
+    Extracts digits only from the Tax ID (NIP).
+    Handles Excel float numbers (removes .0 suffix) and hidden whitespaces properly.
+    """
+    if pd.isna(value):
+        return None
+    
+    # Convert to string and remove spaces/non-breaking spaces (\xa0)
+    text = str(value).replace('\xa0', '').strip()
+    
+    # Trim .0 suffix (issue when Excel imports Tax ID as a float)
+    if text.endswith(".0"):
+        text = text[:-2]
+        
+    digits = re.sub(r"\D", "", text)
+    
+    # Return Tax ID if digits are present
+    return digits if digits else None
+
+
+def normalize_email(value):
+    """
+    Converts email to lowercase, removing leading/trailing whitespaces and hidden characters.
+    """
+    if pd.isna(value):
+        return None
+    text = str(value).replace('\xa0', '').strip().lower()
+    return text if text else None
+
+
+def read_excel_file(path, tax_id_col=None):
+    """
+    Reads an Excel file using openpyxl engine with proper string casting for Tax IDs.
+    """
+    try:
+        # Force reading Tax ID column as pure string (dtype=str)
+        dtype_spec = {tax_id_col: str} if tax_id_col else None
+        return pd.read_excel(path, engine="openpyxl", dtype=dtype_spec)
+    except FileNotFoundError:
+        print(f"ERROR: File not found: {path}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"ERROR reading file {path}: {e}")
+        sys.exit(1)
+
+
+# ============================
+# MAIN LOGIC
+# ============================
+def main():
+    file_users = FILE_PLATFORM_USERS
+    file_leads = FILE_CRM_LEADS
+
+    if len(sys.argv) == 3:
+        file_users = sys.argv[1]
+        file_leads = sys.argv[2]
+
+    print(f"Loading user database: {file_users}")
+    df_users = read_excel_file(file_users, COL_USER_TAX_ID)
+
+    print(f"Loading leads: {file_leads}")
+    df_leads = read_excel_file(file_leads, COL_LEAD_TAX_ID)
+
+    # Strip hidden whitespaces from column headers
+    df_users.columns = df_users.columns.astype(str).str.strip()
+    df_leads.columns = df_leads.columns.astype(str).str.strip()
+
+    # Check if required columns exist in the user database file
+    for col in (COL_USER_TAX_ID, COL_USER_EMAIL):
+        if col not in df_users.columns:
+            print(f"ERROR: Column '{col}' is missing in the user database file. "
+                  f"Available columns: {list(df_users.columns)}")
+            sys.exit(1)
+
+    # Check if required columns exist in the leads file
+    for col in (COL_LEAD_TAX_ID, COL_LEAD_EMAIL, COL_LEAD_SERVICE_TYPE, COL_LEAD_SUBMISSION_DATE):
+        if col not in df_leads.columns:
+            print(f"ERROR: Column '{col}' is missing in the leads file. "
+                  f"Available columns: {list(df_leads.columns)}")
+            sys.exit(1)
+
+    # Normalize matching keys
+    df_users["_tax_id_norm"] = df_users[COL_USER_TAX_ID].apply(normalize_tax_id)
+    df_users["_email_norm"] = df_users[COL_USER_EMAIL].apply(normalize_email)
+
+    df_leads["_tax_id_norm"] = df_leads[COL_LEAD_TAX_ID].apply(normalize_tax_id)
+    df_leads["_email_norm"] = df_leads[COL_LEAD_EMAIL].apply(normalize_email)
+
+    # Create sets of Tax IDs and emails from the user database
+    tax_ids_users = set(df_users["_tax_id_norm"].dropna())
+    emails_users = set(df_users["_email_norm"].dropna())
+
+    # Verification of matching records
+    matches_tax_id = df_leads["_tax_id_norm"].isin(tax_ids_users)
+    matches_email = df_leads["_email_norm"].isin(emails_users)
+
+    df_leads["is_matched"] = matches_tax_id | matches_email
+
+    # Determine matching method
+    def determine_match_type(row):
+        m_tax = row["_matches_tax_id"]
+        m_email = row["_matches_email"]
+        if m_tax and m_email:
+            return "Tax ID and Email"
+        elif m_tax:
+            return "Tax ID only"
+        elif m_email:
+            return "Email only"
+        return "No match"
+
+    df_leads["_matches_tax_id"] = matches_tax_id
+    df_leads["_matches_email"] = matches_email
+    df_leads["match_type"] = df_leads.apply(determine_match_type, axis=1)
+    df_leads.drop(columns=["_matches_tax_id", "_matches_email"], inplace=True)
+
+    # Create lookup dictionaries for metadata mapping
+    users_tax_unique = df_users.dropna(subset=["_tax_id_norm"]).drop_duplicates(subset="_tax_id_norm")
+    users_email_unique = df_users.dropna(subset=["_email_norm"]).drop_duplicates(subset="_email_norm")
+
+    mappings = {}
+    data_columns = ["id", "name", "plan", "registrationDate"]
+    for col in data_columns:
+        if col in df_users.columns:
+            mappings[f"tax_{col}"] = dict(zip(users_tax_unique["_tax_id_norm"], users_tax_unique[col]))
+            mappings[f"email_{col}"] = dict(zip(users_email_unique["_email_norm"], users_email_unique[col]))
+        else:
+            mappings[f"tax_{col}"] = {}
+            mappings[f"email_{col}"] = {}
+
+    # Assign metadata: first by Tax ID, fallback to Email
+    for col in data_columns:
+        val_tax = df_leads["_tax_id_norm"].map(mappings[f"tax_{col}"])
+        val_email = df_leads["_email_norm"].map(mappings[f"email_{col}"])
+        df_leads[f"user_{col}"] = val_tax.fillna(val_email)
+
+    # ----------------------------------------------------
+    # DATE COMPARISON (Date only, ignoring timestamp)
+    # ----------------------------------------------------
+    submission_date_dt = pd.to_datetime(df_leads[COL_LEAD_SUBMISSION_DATE], errors='coerce').dt.date
+    registration_date_dt = pd.to_datetime(df_leads["user_registrationDate"], errors='coerce').dt.date
+
+    # Client had an account BEFORE submitting the lead form (registrationDate < submissionDate)
+    df_leads["had_account_before_lead"] = (
+        df_leads["is_matched"] & 
+        registration_date_dt.notna() & 
+        submission_date_dt.notna() & 
+        (registration_date_dt < submission_date_dt)
+    )
+
+    # Client DID NOT have an account before submitting the lead form (registrationDate >= submissionDate)
+    df_leads["no_account_before_lead"] = (
+        df_leads["is_matched"] & 
+        registration_date_dt.notna() & 
+        submission_date_dt.notna() & 
+        (registration_date_dt >= submission_date_dt)
+    )
+
+    # Split into matched and unmatched DataFrames
+    df_matched = df_leads[df_leads["is_matched"]].copy()
+    df_unmatched = df_leads[~df_leads["is_matched"]].copy()
+
+    # Drop helper columns before saving
+    helper_cols = ["_tax_id_norm", "_email_norm"]
+    df_matched_out = df_matched.drop(columns=helper_cols)
+    df_unmatched_out = df_unmatched.drop(columns=helper_cols)
+    df_all_out = df_leads.drop(columns=helper_cols)
+
+    # Generate summary broken down by service type
+    def generate_service_stats(df, service_name):
+        if service_name == "TOTAL (All)":
+            sub_df = df
+        else:
+            sub_df = df[df[COL_LEAD_SERVICE_TYPE].astype(str).str.strip().str.lower() == service_name.lower()]
+        
+        total_leads = len(sub_df)
+        matched_leads = sub_df[sub_df["is_matched"]]
+        matched_count = len(matched_leads)
+        unmatched_count = total_leads - matched_count
+        
+        percentage = (matched_count / total_leads * 100) if total_leads > 0 else 0.0
+
+        had_before_count = int(sub_df["had_account_before_lead"].sum())
+        no_account_before_count = int(sub_df["no_account_before_lead"].sum())
+
+        return {
+            "Service Type": service_name,
+            "Total Leads": total_leads,
+            "Matched Users": matched_count,
+            "Unmatched Leads": unmatched_count,
+            "% Matched": round(percentage, 2),
+            "Matched by Tax ID & Email": int((matched_leads["match_type"] == "Tax ID and Email").sum()),
+            "Matched by Tax ID only": int((matched_leads["match_type"] == "Tax ID only").sum()),
+            "Matched by Email only": int((matched_leads["match_type"] == "Email only").sum()),
+            "Client HAD account before lead": had_before_count,
+            "Client DID NOT HAVE account before lead": no_account_before_count,
+        }
+
+    stat_type_a = generate_service_stats(df_leads, "Type A")
+    stat_type_b = generate_service_stats(df_leads, "Type B")
+    stat_total = generate_service_stats(df_leads, "TOTAL (All)")
+
+    summary_df = pd.DataFrame([stat_type_a, stat_type_b, stat_total])
+
+    # Export results to an Excel workbook
+    with pd.ExcelWriter(FILE_OUTPUT, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        df_matched_out.to_excel(writer, sheet_name="Matched Leads", index=False)
+        df_unmatched_out.to_excel(writer, sheet_name="Unmatched Leads", index=False)
+        df_all_out.to_excel(writer, sheet_name="All Leads", index=False)
+
+    print("\n=== ANALYSIS SUMMARY ===")
+    print(summary_df.to_string(index=False))
+    print(f"\nResults successfully saved to: {FILE_OUTPUT}")
+
+
+if __name__ == "__main__":
+    main()
